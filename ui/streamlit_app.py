@@ -22,6 +22,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 import matplotlib.pyplot as plt
 import plotly.express as px
 from passlib.hash import bcrypt
+import json
 
 # DB config (same DB as API)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polygraph.db")
@@ -52,6 +53,7 @@ if api_tokens is None:
         sa.Column("user_id", sa.Integer, nullable=False),
         sa.Column("name", sa.String, nullable=True),
         sa.Column("created_at", sa.DateTime, default=datetime.utcnow),
+        sa.Column("config", sa.String, nullable=True),
     )
 if measurements is None:
     measurements = sa.Table(
@@ -64,6 +66,10 @@ if measurements is None:
         sa.Column("pressure", sa.Float),
         sa.Column("metadata", sa.String, nullable=True),
         sa.Column("timestamp", sa.DateTime, default=datetime.utcnow),
+    )
+if "config" not in api_tokens.c:
+    api_tokens.append_column(
+        sa.Column("config", sa.String, nullable=True)  
     )
 metadata.create_all(engine)
 
@@ -240,9 +246,66 @@ else:
         if st.button("Delete Token"):
             if t_revoke>0:
                 revoke_token(t_revoke)
-                st.experimental_rerun()
+                st.rerun()
 
     st.markdown("---")
+
+
+    
+    st.header("Token Configuration")
+
+    for t in tokens:
+        st.subheader(f"{t.name} (ID {t.id})")
+        cfg = json.loads(t.config) if t.config else {}
+        interval = st.number_input(
+            f"Interval (s) for {t.name}",
+            min_value=1,
+            max_value=60,
+            value=int(cfg.get("interval", 2)),
+            key=f"int_{t.id}"
+        )
+
+        gsr_min = st.number_input(
+            f"GSR min for {t.name}",
+            value=float(cfg.get("gsr_range", [0.1, 10])[0]),
+            step=0.1,
+            key=f"gsrmin_{t.id}"
+        )
+
+        gsr_max = st.number_input(
+            f"GSR max for {t.name}",
+            value=float(cfg.get("gsr_range", [0.1, 10])[1]),
+            step=0.1,
+            key=f"gsrmax_{t.id}"
+        )
+
+        pulse_min = st.number_input(
+            f"Pulse min for {t.name}",
+            value=int(cfg.get("pulse_range", [60, 100])[0]),
+            step=1,
+            key=f"pulmin_{t.id}"
+        )
+
+        pulse_max = st.number_input(
+            f"Pulse max for {t.name}",
+            value=int(cfg.get("pulse_range", [60, 100])[1]),
+            step=1,
+            key=f"pulmax_{t.id}"
+        )
+
+        if st.button(f"Save Config {t.name}", key=f"savecfg_{t.id}"):
+            new_cfg = {
+                "interval": interval,
+                "gsr_range": [gsr_min, gsr_max],
+                "pulse_range": [pulse_min, pulse_max],
+                "device_id": f"device_{t.id}"
+            }
+            db = get_db()
+            db.execute(api_tokens.update().where(api_tokens.c.id==t.id).values(config=json.dumps(new_cfg)))
+            db.commit()
+            db.close()
+            st.success(f"Config saved for {t.name}")
+
 
     # --- Live view & controls ---
     st.header("Live Sensor View & Recording")

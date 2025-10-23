@@ -1,24 +1,25 @@
 # api_server.py
 """
-Simple FastAPI server that accepts sensor uploads (JSON) authenticated by api_token.
-Writes to SQLite DB file 'polygraph.db' (same DB used by Streamlit).
-Run with:
-    uvicorn api_server:app --host 0.0.0.0 --port 5000
+FastAPI server for Polygraph sensor nodes.
+Receives JSON uploads authenticated by api_token.
+Writes to SQLite DB 'polygraph.db'.
 """
+
 import os
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 import sqlalchemy as sa
 from sqlalchemy.orm import sessionmaker
 import uuid
+import json
 
-# DB config (same DB as API)
+# DB config
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polygraph.db")
 engine = sa.create_engine(DATABASE_URL)
 metadata = sa.MetaData()
 
-# Tables (if not exist)
+# Tables
 users = sa.Table(
     "users", metadata,
     sa.Column("id", sa.Integer, primary_key=True),
@@ -33,6 +34,7 @@ api_tokens = sa.Table(
     sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id"), nullable=False),
     sa.Column("name", sa.String, nullable=True),
     sa.Column("created_at", sa.DateTime, default=datetime.utcnow),
+    sa.Column("config", sa.String, nullable=True),
 )
 
 measurements = sa.Table(
@@ -46,6 +48,7 @@ measurements = sa.Table(
     sa.Column("metadata", sa.String, nullable=True),
     sa.Column("timestamp", sa.DateTime, default=datetime.utcnow),
 )
+
 
 metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
@@ -64,10 +67,9 @@ class UploadPayload(BaseModel):
 
 def verify_token(db, token_str: str):
     q = sa.select(api_tokens.c.id, api_tokens.c.user_id).where(api_tokens.c.token == token_str)
-    r = db.execute(q).fetchone()
-    return r
+    return db.execute(q).fetchone()
 
-@app.post("/upload")
+@app.post("/api/upload")
 def upload(payload: UploadPayload):
     db = SessionLocal()
     try:
@@ -85,10 +87,34 @@ def upload(payload: UploadPayload):
         )
         db.execute(ins)
         db.commit()
-        return {"status":"ok"}
+        return {"status": "ok"}
     finally:
         db.close()
 
-@app.get("/health")
+@app.get("/api/config")
+def get_node_config(token: str):
+    db = SessionLocal()
+    try:
+        tk = verify_token(db, token)
+        if not tk:
+            raise HTTPException(status_code=401, detail="Invalid API token")
+
+        if tk.config:
+            config = json.loads(tk.config)
+        else:
+            config = {
+                "device_id": f"device_{tk.id}",
+                "interval": 2,
+                "gsr_range": [0.1, 10.0],
+                "pulse_range": [60, 100],
+            }
+        return config
+    finally:
+        db.close()
+
+
+
+@app.get("/api/health")
 def health():
-    return {"status":"ok", "time": datetime.utcnow().isoformat()}
+    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
