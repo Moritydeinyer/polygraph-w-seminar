@@ -23,6 +23,8 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 from passlib.hash import bcrypt
 import json
+from streamlit_autorefresh import st_autorefresh
+
 
 # DB config (same DB as API)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polygraph.db")
@@ -53,7 +55,7 @@ if api_tokens is None:
         sa.Column("user_id", sa.Integer, nullable=False),
         sa.Column("name", sa.String, nullable=True),
         sa.Column("created_at", sa.DateTime, default=datetime.utcnow),
-        sa.Column("config", sa.String, nullable=True),
+        sa.Column("config", sa.JSON, nullable=True, default={}),
     )
 if measurements is None:
     measurements = sa.Table(
@@ -166,10 +168,13 @@ def query_measurements(limit=1000, since_minutes=60, device_id=None):
         if device_id:
             sel = sel.where(measurements.c.device_id == device_id)
         rows = db.execute(sel.limit(limit)).fetchall()
-        df = pd.DataFrame(rows, columns=rows[0].keys()) if rows else pd.DataFrame([])
+        # rows können RowProxy sein → nutze _mapping, um dict zu bekommen
+        data = [dict(r._mapping) for r in rows]
+        df = pd.DataFrame(data)
         return df
     finally:
         db.close()
+
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Polygraph Lab", layout="wide")
@@ -347,22 +352,18 @@ else:
 
     st.write("Recording status:", st.session_state.recording)
 
-    # Show live plot (poll DB)
-    placeholder = st.empty()
-    stop_button = st.button("Stop Live Refresh")
-    keep_running = True
 
-    def build_plot(df_plot):
-        if df_plot.empty:
-            placeholder.info("No available data.")
-            return
-        df_plot = df_plot.sort_values("timestamp")
-        fig = px.line(df_plot, x="timestamp", y="gsr", color="device_id", title="Live GSR")
-        st.plotly_chart(fig, use_container_width=True)
+    count = st_autorefresh(interval=2000, limit=None, key="live_refresh")  
 
-    # Single refresh cycle (non-blocking)
     df = query_measurements(limit=1000, since_minutes=since_minutes, device_id=None if selected_device=="all" else selected_device)
-    build_plot(df)
+
+    st.subheader("Recent measurements (Table)")
+    st.dataframe(df.head(200))
+
+    st.subheader("Live GSR Plot")
+    fig = px.line(df.sort_values("timestamp"), x="timestamp", y="gsr", color="device_id", title="Live GSR")
+    st.plotly_chart(fig, use_container_width=True)
+
 
     # Data table and analytics
     st.subheader("Recent messurements (Table)")
@@ -373,8 +374,10 @@ else:
 
         # compute simple features per-device
         agg = df.groupby('device_id').agg(
-            mean_gsr = sa.func.avg(measurements.c.gsr)
-        )
+            mean_gsr=('gsr', 'mean'),
+            mean_pulse=('pulse', 'mean')
+        )   
+
     else:
         st.info("No messurament data available.")
 

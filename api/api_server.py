@@ -34,7 +34,7 @@ api_tokens = sa.Table(
     sa.Column("user_id", sa.Integer, sa.ForeignKey("users.id"), nullable=False),
     sa.Column("name", sa.String, nullable=True),
     sa.Column("created_at", sa.DateTime, default=datetime.utcnow),
-    sa.Column("config", sa.String, nullable=True),
+    sa.Column("config", sa.JSON, nullable=True, default={}),
 )
 
 measurements = sa.Table(
@@ -66,7 +66,7 @@ class UploadPayload(BaseModel):
     metadata: dict | None = None
 
 def verify_token(db, token_str: str):
-    q = sa.select(api_tokens.c.id, api_tokens.c.user_id).where(api_tokens.c.token == token_str)
+    q = sa.select(api_tokens.c.id, api_tokens.c.user_id, api_tokens.c.config).where(api_tokens.c.token == token_str)
     return db.execute(q).fetchone()
 
 @app.post("/api/upload")
