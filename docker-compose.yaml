@@ -1,0 +1,43 @@
+version: "3.9"
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: polygraph
+      POSTGRES_PASSWORD: ger231tg56er46t4wer561f56w16f81we6
+      POSTGRES_DB: polygraph
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    expose:
+      - 5432
+    networks:
+      nginxproxy:
+          ipv4_address: 172.25.0.90
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    depends_on: [db]
+    environment:
+      DATABASE_URL: postgresql://polygraph:ger231tg56er46t4wer561f56w16f81we6@172.25.0.90:5432/polygraph
+    networks:
+      nginxproxy:
+          ipv4_address: 172.25.0.91
+
+  app:
+    build: ./ui
+    restart: unless-stopped
+    depends_on: [api]
+    expose:
+      - 80   # Streamlit Port 
+    environment:
+      API_URL: http://172.25.0.81:8000
+      DATABASE_URL: postgresql://polygraph:ger231tg56er46t4wer561f56w16f81we6@172.25.0.90:5432/polygraph
+    networks:
+      nginxproxy:
+          ipv4_address: 172.25.0.92
+  
+networks:
+  nginxproxy:
+    external: true
