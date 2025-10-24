@@ -76,6 +76,189 @@ if "config" not in api_tokens.c:
 metadata.create_all(engine)
 
 # ---------- Helpers ----------
+
+
+import io, ast, json
+import pandas as pd
+import matplotlib.pyplot as plt
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Image
+from reportlab.lib.styles import getSampleStyleSheet
+from datetime import datetime
+
+
+
+
+def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, device_filter: str = None) -> bytes:
+    """
+    Generates a PDF report for GSR sensor experiments comparing recorded data to baseline.
+    Only considers measurements with 'recording' flag.
+    
+    Args:
+        df: DataFrame containing all measurements (recording=True).
+        baseline_df: DataFrame containing baseline measurements.
+        device_filter: Optional, only include a specific device_id.
+        
+    Returns:
+        PDF as bytes
+    """
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    styles = getSampleStyleSheet()
+    content = []
+
+    df['metadata'] = df['metadata'].apply(parse_metadata)
+
+    # Filter device if needed
+    if device_filter:
+        df = df[df['device_id'] == device_filter]
+        baseline_df = baseline_df[baseline_df['device_id'] == device_filter]
+
+    devices = df['device_id'].unique()
+    
+    content.append(Paragraph("Polygraph Lab — Automatic Experiment Report", styles['Title']))
+    content.append(Spacer(1, 12))
+    content.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()} UTC", styles['Normal']))
+    content.append(Spacer(1, 12))
+    content.append(Paragraph(
+        "Experiment Objective: Wie beeinflussen physikalische Faktoren – insbesondere Auflagedruck und Feuchtigkeit – "
+        "die Messgenauigkeit eines Lügendetektors basierend auf der galvanischen Hautreaktion (GSR).", 
+        styles['Normal']))
+    content.append(Spacer(1, 12))
+    
+    for device in devices:
+        device_df = df[df['device_id'] == device]
+        device_baseline = baseline_df[baseline_df['device_id'] == device]
+        if device_baseline.empty:
+            continue
+        
+        # Baseline stats
+        baseline_mean = device_baseline['gsr'].mean()
+        baseline_std = device_baseline['gsr'].std()
+        baseline_pressure = device_baseline['pressure'].mean(skipna=True)
+        baseline_humidity = device_baseline['humidity'].mean(skipna=True)
+        
+        # Delta %
+        device_df['delta_percent'] = ((device_df['gsr'] - baseline_mean) / baseline_mean * 100)
+        
+        # Node section header
+        content.append(Paragraph(f"Device: {device}", styles['Heading2']))
+        content.append(Paragraph(f"Baseline GSR: {baseline_mean:.3f} ± {baseline_std:.3f}", styles['Normal']))
+        content.append(Paragraph(f"Baseline Pressure: {baseline_pressure:.1f} g, Baseline Humidity: {baseline_humidity:.1f} %", styles['Normal']))
+        content.append(Spacer(1, 12))
+        
+        # Summary table
+        summary_stats = {
+            "Mean GSR": device_df['gsr'].mean(),
+            "Std GSR": device_df['gsr'].std(),
+            "Min GSR": device_df['gsr'].min(),
+            "Max GSR": device_df['gsr'].max(),
+            "Mean Δ%": device_df['delta_percent'].mean(),
+            "Std Δ%": device_df['delta_percent'].std(),
+            "Mean Pressure": device_df['pressure'].mean(skipna=True),
+            "Mean Humidity": device_df['humidity'].mean(skipna=True)
+        }
+        table_data = [[k, f"{v:.3f}" if isinstance(v, float) else str(v)] for k,v in summary_stats.items()]
+        content.append(Table(table_data))
+        content.append(Spacer(1, 12))
+        
+        # Time-series plot GSR
+        fig, ax = plt.subplots(figsize=(6, 3))
+        df_sorted = device_df.sort_values("timestamp")
+        ax.plot(df_sorted['timestamp'], df_sorted['gsr'], label='GSR')
+        ax.axhline(y=baseline_mean, color='r', linestyle='--', label='Baseline')
+        ax.set_title(f"GSR over Time - {device}")
+        ax.set_xlabel("Timestamp")
+        ax.set_ylabel("GSR")
+        ax.legend()
+        plt.xticks(rotation=30)
+        plt.tight_layout()
+        img_buf = io.BytesIO()
+        fig.savefig(img_buf, format='PNG')
+        plt.close(fig)
+        img_buf.seek(0)
+        content.append(Image(img_buf, width=450, height=200))
+        content.append(Spacer(1,12))
+        
+        # Scatter plots: GSR vs Pressure, GSR vs Humidity
+        for xkey, xlabel in [('pressure','Pressure (g)'), ('humidity','Humidity (%)')]:
+            x_vals = device_df['metadata'].apply(lambda m: m.get(xkey))
+            y_vals = device_df['gsr']
+
+            valid_idx = x_vals.notna() & y_vals.notna()
+            x_vals = x_vals[valid_idx]
+            y_vals = y_vals[valid_idx]
+
+            fig, ax = plt.subplots(figsize=(6,3))
+            ax.scatter(x_vals, y_vals, color='blue')
+            ax.axhline(y=baseline_mean, color='r', linestyle='--', label='Baseline')
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel("GSR")
+            ax.set_title(f"GSR vs {xlabel} - {device}")
+            ax.legend()
+            plt.tight_layout()
+            
+            img_buf = io.BytesIO()
+            fig.savefig(img_buf, format='PNG')
+            plt.close(fig)
+            img_buf.seek(0)
+            content.append(Image(img_buf, width=450, height=200))
+            content.append(Spacer(1,12))
+
+        # Histogram of delta %
+        fig, ax = plt.subplots(figsize=(6,3))
+        ax.hist(device_df['delta_percent'], bins=20, color='green', alpha=0.7)
+        ax.set_title(f"Histogram of % ΔGSR - {device}")
+        ax.set_xlabel("% Δ from Baseline")
+        ax.set_ylabel("Count")
+        plt.tight_layout()
+        img_buf = io.BytesIO()
+        fig.savefig(img_buf, format='PNG')
+        plt.close(fig)
+        img_buf.seek(0)
+        content.append(Image(img_buf, width=450, height=200))
+        content.append(Spacer(1,24))
+        
+        # Optional: optimal pressure (lowest mean delta %)
+        pressure_vals = device_df['metadata'].apply(lambda m: m.get('pressure'))
+        delta_vals = device_df['delta_percent']
+
+        if not pressure_vals.dropna().empty and not delta_vals.dropna().empty:
+            try:
+                optimal_pressure_row = device_df.groupby(pressure_vals)['delta_percent'].mean().idxmin()
+                content.append(Paragraph(f"Estimated optimal pressure for minimal GSR deviation: {optimal_pressure_row:.1f} g", styles['Normal']))
+                content.append(Spacer(1,24))
+            except ValueError:
+                # falls idxmin trotzdem fehlschlägt
+                content.append(Paragraph("Estimated optimal pressure: N/A", styles['Normal']))
+                content.append(Spacer(1,24))
+        else:
+            content.append(Paragraph("Estimated optimal pressure: N/A", styles['Normal']))
+            content.append(Spacer(1,24))
+
+        content.append(Spacer(1,24))
+    
+    doc.build(content)
+    buf.seek(0)
+    return buf.read()
+
+
+
+def parse_metadata(x):
+    """Safe parsing of metadata: JSON or Python dict string."""
+    if isinstance(x, str):
+        try:
+            return json.loads(x)
+        except json.JSONDecodeError:
+            try:
+                return ast.literal_eval(x)
+            except:
+                return {}
+    elif isinstance(x, dict):
+        return x
+    return {}
+
+
 def get_db():
     return SessionLocal()
 
@@ -165,12 +348,16 @@ def query_measurements(limit=1000, since_minutes=60, device_id=None):
         if device_id:
             sel = sel.where(measurements.c.device_id == device_id)
         rows = db.execute(sel.limit(limit)).fetchall()
-        # rows können RowProxy sein → nutze _mapping, um dict zu bekommen
         data = [dict(r._mapping) for r in rows]
         df = pd.DataFrame(data)
+        if not df.empty and 'metadata' in df.columns:
+            df['metadata'] = df['metadata'].apply(parse_metadata) 
+            df['pressure'] = df['metadata'].apply(lambda m: float(m.get('pressure')) if m.get('pressure') is not None else float('nan'))
+            df['humidity'] = df['metadata'].apply(lambda m: float(m.get('humidity')) if m.get('humidity') is not None else float('nan'))
         return df
     finally:
         db.close()
+
 
 
 # ---------- Streamlit UI ----------
@@ -277,15 +464,18 @@ else:
                     last_seen = last_row.timestamp
                     lag = (now - last_seen).total_seconds()
                     online = lag < 5  
+                    display_lag = round(lag, 1) if lag < 120 else "-"
                 else:
                     last_seen = None
                     lag = None
                     online = False
+                    display_lag = "-"
+
 
                 status_list.append({
                     "Device": node,
                     "Last Seen": last_seen.strftime("%H:%M:%S") if last_seen else "Never",
-                    "Lag (s)": round(lag, 1) if lag else "-",
+                    "Lag (s)": display_lag,
                     "Status": "🟢 Online" if online else "🔴 Offline"
                 })
             return pd.DataFrame(status_list)
@@ -359,18 +549,37 @@ else:
 
 
     if st.button("Record Baseline (10 s)"):
-        df = query_measurements(limit=1000, since_minutes=10, device_id=None if selected_device=="all" else selected_device)
-        if df.empty:
-            st.warning("No measurement data found for baseline capture.")
-        else:
-            cutoff = datetime.utcnow() - timedelta(seconds=10)
-            df_recent = df[df['timestamp'] >= cutoff]
+        db = get_db()
+        try:
+            now = datetime.utcnow()
+            cutoff = now - timedelta(seconds=10)
+
+            df_recent = pd.DataFrame([
+                dict(r._mapping) for r in db.execute(
+                    sa.select(measurements)
+                    .where(measurements.c.timestamp >= cutoff)
+                ).fetchall()
+            ])
+            
             if df_recent.empty:
-                st.warning("No measurement data for the last 10s.")
+                st.warning("No measurement data found for baseline capture.")
             else:
-                baseline = df_recent['gsr'].mean()
-                st.success(f"Baseline (mean GSR over last 10s): {baseline:.3f}")
-                st.session_state["baseline"] = baseline
+                for row in df_recent.itertuples():
+                    meta = parse_metadata(row.metadata)
+                    meta['baseline'] = True
+                    db.execute(
+                        measurements.update()
+                        .where(measurements.c.id == row.id)
+                        .values(metadata=json.dumps(meta))
+                    )
+                db.commit()
+
+                baseline_mean = df_recent['gsr'].mean()
+                st.session_state["baseline"] = baseline_mean
+                st.success(f"Baseline recorded over last 10 s: mean GSR = {baseline_mean:.3f}")
+        finally:
+            db.close()
+
 
     # --- Experiment Controls ---
     if "recording" not in st.session_state:
@@ -423,57 +632,35 @@ else:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("Download CSV", data=csv, file_name="measurements_export.csv", mime="text/csv")
 
-    if st.button("Generate PDF Report"):
+
+    if st.button("Generate PDF Report (EXPERIMENTAL v.1.5)"):
         df_all = query_measurements(limit=5000, since_minutes=24*60)
         if df_all.empty:
-            st.warning("No data available for Report.")
+            st.warning("No data available for report.")
         else:
-            pdf_bytes = generate_report_pdf(
-                df_all,
-                st.session_state.get("baseline", None),
-                st.session_state.get("pressure_value", 100.0),  
-                st.session_state.get("humidity_value", 50.0)
-            )
-            st.download_button("Download Report", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+            df_all = df_all[df_all['metadata'].notnull()]
+            df_all['metadata'] = df_all['metadata'].apply(parse_metadata)  
+
+            df_record = df_all[df_all['metadata'].apply(lambda m: m.get('recording') or m.get('baseline', False))]
+            df_baseline = df_all[df_all['metadata'].apply(lambda m: m.get('baseline', False))]
+
+            if df_record.empty or df_baseline.empty:
+                st.warning("Not enough data for PDF report (need recordings + baseline).")
+            else:
+                pdf_bytes = generate_experiment_report(
+                    df_record,
+                    df_baseline,
+                    device_filter=None
+                )
+                st.download_button(
+                    "Download PDF Report",
+                    data=pdf_bytes,
+                    file_name="experiment_report.pdf",
+                    mime="application/pdf"
+                )
 
 
 
-# ---------- Report generation ----------
-def generate_report_pdf(df, baseline_val, weight_g, humidity_ul):
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4)
-    styles = getSampleStyleSheet()
-    content = []
-    content.append(Paragraph("Polygraph Lab — Report", styles['Title']))
-    content.append(Spacer(1,12))
-    content.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()}", styles['Normal']))
-    content.append(Paragraph(f"Baseline (GSR): {baseline_val}", styles['Normal']))
-    content.append(Paragraph(f"Weight set: {weight_g} g — Humidity: {humidity_ul} µL", styles['Normal']))
-    content.append(Spacer(1,12))
 
-    # Summary stats
-    content.append(Paragraph("Summary Stats (last loaded dataset)", styles['Heading2']))
-    try:
-        stats = df['gsr'].describe().to_frame().to_html()
-        content.append(Paragraph("Basic stats included", styles['Normal']))
-    except Exception as e:
-        content.append(Paragraph("No stats", styles['Normal']))
 
-    # include a time-series plot
-    try:
-        fig, ax = plt.subplots(figsize=(6,3))
-        df_sorted = df.sort_values("timestamp")
-        plt.plot(df_sorted['timestamp'], df_sorted['gsr'])
-        plt.xticks(rotation=30)
-        plt.title("GSR over time")
-        plt.tight_layout()
-        img_buf = io.BytesIO()
-        fig.savefig(img_buf, format='PNG')
-        img_buf.seek(0)
-        content.append(Image(img_buf, width=450, height=200))
-    except Exception as e:
-        content.append(Paragraph(f"Plot error: {e}", styles['Normal']))
 
-    doc.build(content)
-    buf.seek(0)
-    return buf.read()

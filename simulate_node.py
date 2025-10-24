@@ -6,7 +6,7 @@ from datetime import datetime
 
 # === CONFIG ===
 API_BASE = "https://polygraph-w.ddns.net/api"  # URL zu deinem FastAPI Server
-TOKEN = "API-TOKEN"           # Token aus Streamlit UI
+TOKEN = "API_KEY"           # Token aus Streamlit UI
 
 CONFIG_POLL_INTERVAL = 10  # s, wie oft neue Config geladen wird
 
@@ -32,6 +32,8 @@ def generate_measurement(cfg):
         "pulse": pulse,
         "humidity": None,
         "pressure": None,
+        "humidity": cfg.get("humidity"),
+        "pressure": cfg.get("pressure"),
         "metadata": {"simulated": True}
     }
     return data
