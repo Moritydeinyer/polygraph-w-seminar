@@ -76,18 +76,25 @@ def upload(payload: UploadPayload):
         tk = verify_token(db, payload.token)
         if not tk:
             raise HTTPException(status_code=401, detail="Invalid API token")
+
+        cfg = json.loads(tk.config) if tk.config else {}
+        recording = cfg.get("recording", False)  # Default: False
+
+        meta = payload.metadata.copy() if payload.metadata else {}
+        meta["recording"] = recording
+
         ins = measurements.insert().values(
             device_id=payload.device_id,
             gsr=payload.gsr,
             pulse=payload.pulse,
             humidity=payload.humidity,
             pressure=payload.pressure,
-            metadata=str(payload.metadata) if payload.metadata else None,
+            metadata=str(meta) if meta else None,
             timestamp=datetime.utcnow()
         )
         db.execute(ins)
         db.commit()
-        return {"status": "ok"}
+        return {"status": "ok", "recording": recording}
     finally:
         db.close()
 
@@ -101,12 +108,15 @@ def get_node_config(token: str):
 
         if tk.config:
             config = json.loads(tk.config)
+            config.setdefault("device_id", f"device_{tk.id}")
         else:
             config = {
                 "device_id": f"device_{tk.id}",
                 "interval": 2,
                 "gsr_range": [0.1, 10.0],
                 "pulse_range": [60, 100],
+                "pressure": 100.0,
+                "humidity": 50.0,
             }
         return config
     finally:

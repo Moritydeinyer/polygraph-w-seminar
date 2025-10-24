@@ -143,22 +143,19 @@ def revoke_token(token_id):
     finally:
         db.close()
 
-def insert_measurement(d):
+def update_recording_flag(user_id, recording: bool):
     db = get_db()
     try:
-        ins = measurements.insert().values(
-            device_id=d.get("device_id"),
-            gsr=d.get("gsr"),
-            pulse=d.get("pulse"),
-            humidity=d.get("humidity"),
-            pressure=d.get("pressure"),
-            metadata=str(d.get("metadata")) if d.get("metadata") else None,
-            timestamp=datetime.utcnow()
-        )
-        db.execute(ins)
+        tokens = db.execute(sa.select(api_tokens).where(api_tokens.c.user_id == user_id)).fetchall()
+        for t in tokens:
+            cfg = json.loads(t.config) if t.config else {}
+            cfg['recording'] = recording
+            db.execute(api_tokens.update().where(api_tokens.c.id == t.id).values(config=json.dumps(cfg)))
         db.commit()
     finally:
         db.close()
+
+
 
 def query_measurements(limit=1000, since_minutes=60, device_id=None):
     db = get_db()
@@ -256,60 +253,85 @@ else:
     st.markdown("---")
 
 
+    from datetime import datetime
+    from streamlit_autorefresh import st_autorefresh
+
     
-    st.header("Token Configuration")
+    def get_node_status():
+        db = get_db()
+        try:
+            nodes = db.execute(sa.select(sa.distinct(measurements.c.device_id))).fetchall()
+            nodes = [n[0] for n in nodes]
 
-    for t in tokens:
-        st.subheader(f"{t.name} (ID {t.id})")
-        cfg = json.loads(t.config) if t.config else {}
-        interval = st.number_input(
-            f"Interval (s) for {t.name}",
-            min_value=1,
-            max_value=60,
-            value=int(cfg.get("interval", 2)),
-            key=f"int_{t.id}"
-        )
+            status_list = []
+            now = datetime.utcnow()
+            for node in nodes:
+                last_row = db.execute(
+                    sa.select(measurements)
+                    .where(measurements.c.device_id == node)
+                    .order_by(measurements.c.timestamp.desc())
+                    .limit(1)
+                ).fetchone()
 
-        gsr_min = st.number_input(
-            f"GSR min for {t.name}",
-            value=float(cfg.get("gsr_range", [0.1, 10])[0]),
-            step=0.1,
-            key=f"gsrmin_{t.id}"
-        )
+                if last_row:
+                    last_seen = last_row.timestamp
+                    lag = (now - last_seen).total_seconds()
+                    online = lag < 5  
+                else:
+                    last_seen = None
+                    lag = None
+                    online = False
 
-        gsr_max = st.number_input(
-            f"GSR max for {t.name}",
-            value=float(cfg.get("gsr_range", [0.1, 10])[1]),
-            step=0.1,
-            key=f"gsrmax_{t.id}"
-        )
+                status_list.append({
+                    "Device": node,
+                    "Last Seen": last_seen.strftime("%H:%M:%S") if last_seen else "Never",
+                    "Lag (s)": round(lag, 1) if lag else "-",
+                    "Status": "🟢 Online" if online else "🔴 Offline"
+                })
+            return pd.DataFrame(status_list)
+        finally:
+            db.close()
 
-        pulse_min = st.number_input(
-            f"Pulse min for {t.name}",
-            value=int(cfg.get("pulse_range", [60, 100])[0]),
-            step=1,
-            key=f"pulmin_{t.id}"
-        )
+    st.header("Node Overview")
 
-        pulse_max = st.number_input(
-            f"Pulse max for {t.name}",
-            value=int(cfg.get("pulse_range", [60, 100])[1]),
-            step=1,
-            key=f"pulmax_{t.id}"
-        )
+    placeholder = st.empty()
 
-        if st.button(f"Save Config {t.name}", key=f"savecfg_{t.id}"):
-            new_cfg = {
+    with placeholder.container():
+        df_nodes = get_node_status()
+        if not df_nodes.empty:
+            st.table(df_nodes)
+        else:
+            st.info("No nodes registered / measurements available yet.")
+
+    
+    st.header("Global Token Configuration")
+
+    # --- Global configuration inputs ---
+    interval = st.number_input("Interval (s)", min_value=1, max_value=60, value=2, step=1)
+    gsr_min = st.number_input("GSR min (Simulation only)", value=0.1, step=0.1)
+    gsr_max = st.number_input("GSR max (Simulation only)", value=10.0, step=0.1)
+    pulse_min = st.number_input("Pulse min (Simulation only)", value=60, step=1)
+    pulse_max = st.number_input("Pulse max (Simulation only)", value=100, step=1)
+    pressure_val = st.number_input("Pressure (kPa)", min_value=0.0, step=1.0, value=st.session_state.get("pressure_value", 100.0))
+    humidity_val = st.number_input("Humidity (%)", min_value=0.0, step=1.0, value=st.session_state.get("humidity_value", 50.0))
+
+    if st.button("Apply Config to All Nodes"):
+        db = get_db()
+        for t in db.execute(sa.select(api_tokens)).fetchall():
+            cfg = json.loads(t.config) if t.config else {}
+            cfg.update({
                 "interval": interval,
                 "gsr_range": [gsr_min, gsr_max],
                 "pulse_range": [pulse_min, pulse_max],
-                "device_id": f"device_{t.id}"
-            }
-            db = get_db()
-            db.execute(api_tokens.update().where(api_tokens.c.id==t.id).values(config=json.dumps(new_cfg)))
-            db.commit()
-            db.close()
-            st.success(f"Config saved for {t.name}")
+                "pressure": pressure_val,
+                "humidity": humidity_val
+            })
+            db.execute(api_tokens.update().where(api_tokens.c.id == t.id).values(config=json.dumps(cfg)))
+        db.commit()
+        db.close()
+        st.success("Configuration applied to all nodes.")
+
+
 
 
     # --- Live view & controls ---
@@ -321,16 +343,26 @@ else:
     refresh = st.slider("Refresh (s)", 1, 5, 2)
 
     # Baseline & experiment controls
-    st.subheader("Experiment-Parameter")
-    weight = st.number_input("Contactpressure (g)", min_value=0.0, step=1.0, value=150.0)
-    humidity_level = st.number_input("Moisture content (µL on Pad)", min_value=0.0, step=1.0, value=10.0)
+    st.subheader("Experiment Controls")
+
+    if "refresh_active" not in st.session_state:
+        st.session_state.refresh_active = True
+
+    refresh_col1, refresh_col2 = st.columns(2)
+    if refresh_col1.button("Stop Live Refresh"):
+        st.session_state.refresh_active = False
+    if refresh_col2.button("Start Live Refresh"):
+        st.session_state.refresh_active = True
+
+    if st.session_state.refresh_active:
+        count = st_autorefresh(interval=refresh*1000, limit=None, key="node_overview_refresh")
+
+
     if st.button("Record Baseline (10 s)"):
-        # capture baseline: read latest 10 s of measurements (from selected device)
         df = query_measurements(limit=1000, since_minutes=10, device_id=None if selected_device=="all" else selected_device)
         if df.empty:
             st.warning("No measurement data found for baseline capture.")
         else:
-            # take last 10s
             cutoff = datetime.utcnow() - timedelta(seconds=10)
             df_recent = df[df['timestamp'] >= cutoff]
             if df_recent.empty:
@@ -340,46 +372,48 @@ else:
                 st.success(f"Baseline (mean GSR over last 10s): {baseline:.3f}")
                 st.session_state["baseline"] = baseline
 
-    # Recording controls (tagging)
+    # --- Experiment Controls ---
     if "recording" not in st.session_state:
         st.session_state.recording = False
+
     rec_col1, rec_col2 = st.columns(2)
+
     if rec_col1.button("Start Recording"):
         st.session_state.recording = True
         st.session_state.record_start = datetime.utcnow().isoformat()
+        st.session_state.pressure_value = pressure_val
+        st.session_state.humidity_value = humidity_val
+        update_recording_flag(user['id'], True)
+
     if rec_col2.button("Stop Recording"):
         st.session_state.recording = False
+        update_recording_flag(user['id'], False)
+
+
 
     st.write("Recording status:", st.session_state.recording)
 
+    # -------- Live Table + Chart (partial refresh) --------
+    placeholder = st.empty()
 
-    count = st_autorefresh(interval=2000, limit=None, key="live_refresh")  
+    with placeholder.container():
+        df = query_measurements(limit=1000, since_minutes=since_minutes,
+                                device_id=None if selected_device=="all" else selected_device)
 
-    df = query_measurements(limit=1000, since_minutes=since_minutes, device_id=None if selected_device=="all" else selected_device)
+        if df is not None and not df.empty:
+            st.subheader("Live Data")
+            st.dataframe(df.head(200), use_container_width=True)
+            fig = px.line(df.sort_values("timestamp"),
+                        x="timestamp", y="gsr", color="device_id",
+                        title="GSR over Time")
+            st.plotly_chart(fig, use_container_width=True, key="live_chart")
+        else:
+            st.warning("No data available.")
 
-    st.subheader("Recent measurements (Table)")
-    st.dataframe(df.head(200))
-
-    st.subheader("Live GSR Plot")
-    fig = px.line(df.sort_values("timestamp"), x="timestamp", y="gsr", color="device_id", title="Live GSR")
-    st.plotly_chart(fig, use_container_width=True)
 
 
-    # Data table and analytics
-    st.subheader("Recent messurements (Table)")
-    if not df.empty:
-        df_display = df.copy()
-        df_display['timestamp'] = df_display['timestamp'].astype(str)
-        st.dataframe(df_display.head(200))
 
-        # compute simple features per-device
-        agg = df.groupby('device_id').agg(
-            mean_gsr=('gsr', 'mean'),
-            mean_pulse=('pulse', 'mean')
-        )   
 
-    else:
-        st.info("No messurament data available.")
 
     # Export CSV
     if st.button("Export CSV (recent period)"):
@@ -389,15 +423,19 @@ else:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("Download CSV", data=csv, file_name="measurements_export.csv", mime="text/csv")
 
-    # Generate PDF report
     if st.button("Generate PDF Report"):
-        # build simple PDF with summary stats & plots
         df_all = query_measurements(limit=5000, since_minutes=24*60)
         if df_all.empty:
             st.warning("No data available for Report.")
         else:
-            pdf_bytes = generate_report_pdf(df_all, st.session_state.get("baseline", None), weight, humidity_level)
+            pdf_bytes = generate_report_pdf(
+                df_all,
+                st.session_state.get("baseline", None),
+                st.session_state.get("pressure_value", 100.0),  
+                st.session_state.get("humidity_value", 50.0)
+            )
             st.download_button("Download Report", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
 
 
 # ---------- Report generation ----------
