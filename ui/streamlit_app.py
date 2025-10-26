@@ -695,6 +695,49 @@ else:
                 )
 
 
+    # --- Danger Zone ---
+    st.markdown("---")
+    st.header("Danger Zone")
+
+    st.warning(
+        "**This will permanently delete your account, all API tokens, and all related measurements.** "
+        "This action cannot be undone."
+    )
+
+    confirm_user = st.text_input("Type your username to confirm deletion:", key="confirm_delete")
+    if st.button("Delete My Account", type="primary"):
+        if confirm_user.strip() != st.session_state.username:
+            st.error("Confirmation failed — username does not match.")
+        else:
+            db = get_db()
+            try:
+                # Get user info
+                user_row = db.execute(sa.select(users).where(users.c.username == st.session_state.username)).fetchone()
+                if not user_row:
+                    st.error("User not found.")
+                else:
+                    user_id = user_row.id
+
+                    # 1. Delete all tokens
+                    tokens = db.execute(sa.select(api_tokens).where(api_tokens.c.user_id == user_id)).fetchall()
+                    token_ids = [t.id for t in tokens]
+                    db.execute(api_tokens.delete().where(api_tokens.c.user_id == user_id))
+
+                    # 2. Delete all measurements from these devices
+                    device_ids = [f"device_{tid}" for tid in token_ids]
+                    if device_ids:
+                        db.execute(measurements.delete().where(measurements.c.device_id.in_(device_ids)))
+
+                    # 3. Delete user
+                    db.execute(users.delete().where(users.c.id == user_id))
+                    db.commit()
+
+                    st.success("Account and all data permanently deleted.")
+                    st.session_state.authenticated = False
+                    st.session_state.username = None
+                    st.rerun()
+            finally:
+                db.close()
 
 
 
