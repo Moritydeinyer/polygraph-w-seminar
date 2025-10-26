@@ -87,160 +87,204 @@ from reportlab.lib.styles import getSampleStyleSheet
 from datetime import datetime
 
 
-
-
 def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, device_filter: str = None) -> bytes:
     """
     Generates a PDF report for GSR sensor experiments comparing recorded data to baseline.
-    Only considers measurements with 'recording' flag.
-    
-    Args:
-        df: DataFrame containing all measurements (recording=True).
-        baseline_df: DataFrame containing baseline measurements.
-        device_filter: Optional, only include a specific device_id.
-        
-    Returns:
-        PDF as bytes
+    Focused on GSR baseline and per-humidity/pressure analysis.
     """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
     content = []
 
+    # --- fix: ensure metadata is parsed ---
     df['metadata'] = df['metadata'].apply(parse_metadata)
+    baseline_df['metadata'] = baseline_df['metadata'].apply(parse_metadata)
 
-    # Filter device if needed
+    # --- optional filter ---
     if device_filter:
         df = df[df['device_id'] == device_filter]
         baseline_df = baseline_df[baseline_df['device_id'] == device_filter]
 
     devices = df['device_id'].unique()
-    
+
+    # --- header  ---
     content.append(Paragraph("Polygraph Lab — Automatic Experiment Report", styles['Title']))
     content.append(Spacer(1, 12))
     content.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()} UTC", styles['Normal']))
     content.append(Spacer(1, 12))
     content.append(Paragraph(
-        "Experiment Objective: Wie beeinflussen physikalische Faktoren – insbesondere Auflagedruck und Feuchtigkeit – "
-        "die Messgenauigkeit eines Lügendetektors basierend auf der galvanischen Hautreaktion (GSR).", 
-        styles['Normal']))
-    content.append(Spacer(1, 12))
-    
+        "Experiment Objective: Wie beeinflussen physikalische Faktoren - insbesondere Auflagedruck und "
+        "Feuchtigkeit - die Messgenauigkeit eines Lügendetektors basierend auf der galvanischen Hautreaktion (GSR).",
+        styles['Normal']
+    ))
+    content.append(Spacer(1, 24))
+
+    # --- device loop ---
     for device in devices:
+        content.append(Paragraph(f"Device: {device}", styles['Heading2']))
+
         device_df = df[df['device_id'] == device]
         device_baseline = baseline_df[baseline_df['device_id'] == device]
+
         if device_baseline.empty:
+            content.append(Paragraph("No baseline data available.", styles['Normal']))
+            content.append(Spacer(1, 24))
             continue
-        
-        # Baseline stats
-        baseline_mean = device_baseline['gsr'].mean()
-        baseline_std = device_baseline['gsr'].std()
-        baseline_pressure = device_baseline['pressure'].mean(skipna=True)
-        baseline_humidity = device_baseline['humidity'].mean(skipna=True)
-        
-        # Delta %
-        device_df['delta_percent'] = ((device_df['gsr'] - baseline_mean) / baseline_mean * 100)
-        
-        # Node section header
-        content.append(Paragraph(f"Device: {device}", styles['Heading2']))
-        content.append(Paragraph(f"Baseline GSR: {baseline_mean:.3f} ± {baseline_std:.3f}", styles['Normal']))
-        content.append(Paragraph(f"Baseline Pressure: {baseline_pressure:.1f} g, Baseline Humidity: {baseline_humidity:.1f} %", styles['Normal']))
+
+        # === BASELINE SECTION ===
+        baseline_mean = device_baseline['gsr'].mean(skipna=True)
+        baseline_std = device_baseline['gsr'].std(skipna=True)
+        base_press = device_baseline['pressure'].mean(skipna=True)
+        base_hum = device_baseline['humidity'].mean(skipna=True)
+
+        # Show baseline GSR stats
+        content.append(Paragraph(f"GSR Baseline: {baseline_mean:.3f} ± {baseline_std:.3f}", styles['Normal']))
+        content.append(Paragraph(f"Baseline Pressure: {base_press:.1f} g | Baseline Humidity: {base_hum:.1f} %", styles['Normal']))
         content.append(Spacer(1, 12))
-        
-        # Summary table
-        summary_stats = {
-            "Mean GSR": device_df['gsr'].mean(),
-            "Std GSR": device_df['gsr'].std(),
-            "Min GSR": device_df['gsr'].min(),
-            "Max GSR": device_df['gsr'].max(),
-            "Mean Δ%": device_df['delta_percent'].mean(),
-            "Std Δ%": device_df['delta_percent'].std(),
-            "Mean Pressure": device_df['pressure'].mean(skipna=True),
-            "Mean Humidity": device_df['humidity'].mean(skipna=True)
-        }
-        table_data = [[k, f"{v:.3f}" if isinstance(v, float) else str(v)] for k,v in summary_stats.items()]
-        content.append(Table(table_data))
-        content.append(Spacer(1, 12))
-        
-        # Time-series plot GSR
+
+        # --- plot baseline over time ---
+        base_sorted = device_baseline.sort_values("timestamp")
         fig, ax = plt.subplots(figsize=(6, 3))
-        df_sorted = device_df.sort_values("timestamp")
-        ax.plot(df_sorted['timestamp'], df_sorted['gsr'], label='GSR')
-        ax.axhline(y=baseline_mean, color='r', linestyle='--', label='Baseline')
-        ax.set_title(f"GSR over Time - {device}")
+        ax.plot(base_sorted['timestamp'], base_sorted['gsr'], label='Baseline GSR', color='r')
+        ax.set_title(f"Baseline GSR vs Time - {device}")
         ax.set_xlabel("Timestamp")
         ax.set_ylabel("GSR")
         ax.legend()
         plt.xticks(rotation=30)
         plt.tight_layout()
-        img_buf = io.BytesIO()
-        fig.savefig(img_buf, format='PNG')
-        plt.close(fig)
-        img_buf.seek(0)
-        content.append(Image(img_buf, width=450, height=200))
-        content.append(Spacer(1,12))
         
-        # Scatter plots: GSR vs Pressure, GSR vs Humidity
-        for xkey, xlabel in [('pressure','Pressure (g)'), ('humidity','Humidity (%)')]:
-            x_vals = device_df['metadata'].apply(lambda m: m.get(xkey))
-            y_vals = device_df['gsr']
+        img_buf = io.BytesIO()
+        fig.savefig(img_buf, format='PNG', bbox_inches='tight')
+        img_buf.seek(0)
 
-            valid_idx = x_vals.notna() & y_vals.notna()
-            x_vals = x_vals[valid_idx]
-            y_vals = y_vals[valid_idx]
+        svg_buf = io.BytesIO()
+        fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
+        svg_buf.seek(0)
 
-            fig, ax = plt.subplots(figsize=(6,3))
-            ax.scatter(x_vals, y_vals, color='blue')
+        content.append(Image(img_buf, width=450, height=200))
+        plt.close(fig)
+        content.append(Spacer(1, 24))
+
+
+        # === HUMIDITY ANALYSIS ===
+        hum_levels = sorted(device_df['humidity'].dropna().unique())
+        for hum in hum_levels:
+            hum_df = device_df[device_df['humidity'] == hum]
+            if hum_df.empty:
+                continue
+
+            x_vals = hum_df['pressure']
+            y_vals = hum_df['gsr']
+
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.scatter(x_vals, y_vals, color='blue', alpha=0.7)
             ax.axhline(y=baseline_mean, color='r', linestyle='--', label='Baseline')
-            ax.set_xlabel(xlabel)
+            ax.set_xlabel("Pressure (g)")
             ax.set_ylabel("GSR")
-            ax.set_title(f"GSR vs {xlabel} - {device}")
+            ax.set_title(f"GSR vs Pressure @ {hum:.1f}% Humidity")
             ax.legend()
             plt.tight_layout()
-            
-            img_buf = io.BytesIO()
-            fig.savefig(img_buf, format='PNG')
-            plt.close(fig)
-            img_buf.seek(0)
-            content.append(Image(img_buf, width=450, height=200))
-            content.append(Spacer(1,12))
 
-        # Histogram of delta %
-        fig, ax = plt.subplots(figsize=(6,3))
-        ax.hist(device_df['delta_percent'], bins=20, color='green', alpha=0.7)
-        ax.set_title(f"Histogram of % ΔGSR - {device}")
-        ax.set_xlabel("% Δ from Baseline")
+            img_buf = io.BytesIO()
+            fig.savefig(img_buf, format='PNG', bbox_inches='tight')
+            img_buf.seek(0)
+
+            svg_buf = io.BytesIO()
+            fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
+            svg_buf.seek(0)
+
+            content.append(Image(img_buf, width=450, height=200))
+            plt.close(fig)
+
+            # max gsr for humidity
+            idxmax = y_vals.idxmax()
+            if pd.notna(idxmax):
+                opt_press = hum_df.loc[idxmax, 'pressure']
+                opt_gsr = hum_df.loc[idxmax, 'gsr']
+                content.append(Paragraph(f"Max GSR: {opt_gsr:.3f} @ {opt_press:.1f} g", styles['Normal']))
+            else:
+                content.append(Paragraph("No valid max-values available.", styles['Normal']))
+            content.append(Spacer(1, 24))
+
+
+        # === PRESSURE ANALYSIS ===
+        pres_levels = sorted(device_df['pressure'].dropna().unique())
+        for pres in pres_levels:
+            pres_df = device_df[device_df['pressure'] == pres]
+            if pres_df.empty:
+                continue
+
+            x_vals = pres_df['humidity']
+            y_vals = pres_df['gsr']
+
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.scatter(x_vals, y_vals, color='green', alpha=0.7)
+            ax.axhline(y=baseline_mean, color='r', linestyle='--', label='Baseline')
+            ax.set_xlabel("Humidity (%)")
+            ax.set_ylabel("GSR")
+            ax.set_title(f"GSR vs Humidity @ {pres:.1f} g Pressure")
+            ax.legend()
+            plt.tight_layout()
+
+            img_buf = io.BytesIO()
+            fig.savefig(img_buf, format='PNG', bbox_inches='tight')
+            img_buf.seek(0)
+
+            svg_buf = io.BytesIO()
+            fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
+            svg_buf.seek(0)
+
+            content.append(Image(img_buf, width=450, height=200))
+            plt.close(fig)
+
+            idxmax = y_vals.idxmax()
+            if pd.notna(idxmax):
+                opt_hum = pres_df.loc[idxmax, 'humidity']
+                opt_gsr = pres_df.loc[idxmax, 'gsr']
+                content.append(Paragraph(f"Max GSR: {opt_gsr:.3f} @ {opt_hum:.1f}% Humidity", styles['Normal']))
+            else:
+                content.append(Paragraph("No valid max-values available.", styles['Normal']))
+            content.append(Spacer(1, 24))
+
+
+        # === HISTOGRAM ===
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.hist(device_df['gsr'].dropna(), bins=20, color='gray', alpha=0.7)
+        ax.set_title(f"GSR Distribution - {device}")
+        ax.set_xlabel("GSR")
         ax.set_ylabel("Count")
         plt.tight_layout()
+
         img_buf = io.BytesIO()
-        fig.savefig(img_buf, format='PNG')
-        plt.close(fig)
+        fig.savefig(img_buf, format='PNG', bbox_inches='tight')
         img_buf.seek(0)
+
+        svg_buf = io.BytesIO()
+        fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
+        svg_buf.seek(0)
+
         content.append(Image(img_buf, width=450, height=200))
-        content.append(Spacer(1,24))
-        
-        # Optional: optimal pressure (lowest mean delta %)
-        pressure_vals = device_df['metadata'].apply(lambda m: m.get('pressure'))
-        delta_vals = device_df['delta_percent']
+        plt.close(fig)
+        content.append(Spacer(1, 24))
 
-        if not pressure_vals.dropna().empty and not delta_vals.dropna().empty:
-            try:
-                optimal_pressure_row = device_df.groupby(pressure_vals)['delta_percent'].mean().idxmin()
-                content.append(Paragraph(f"Estimated optimal pressure for minimal GSR deviation: {optimal_pressure_row:.1f} g", styles['Normal']))
-                content.append(Spacer(1,24))
-            except ValueError:
-                # falls idxmin trotzdem fehlschlägt
-                content.append(Paragraph("Estimated optimal pressure: N/A", styles['Normal']))
-                content.append(Spacer(1,24))
+
+        # === OVERALL OPTIMAL PRESSURE ===
+        pressure_means = device_df.groupby('pressure')['gsr'].mean()
+        if not pressure_means.empty:
+            opt_pressure = pressure_means.idxmax()
+            content.append(Paragraph(f"Overall optimal pressure: {opt_pressure:.1f} g", styles['Normal']))
         else:
-            content.append(Paragraph("Estimated optimal pressure: N/A", styles['Normal']))
-            content.append(Spacer(1,24))
+            content.append(Paragraph("Overall optimal pressure: N/A", styles['Normal']))
+        content.append(Spacer(1, 36))
 
-        content.append(Spacer(1,24))
-    
+
+    # === finish ===
     doc.build(content)
     buf.seek(0)
     return buf.read()
+
+
 
 
 
@@ -326,34 +370,50 @@ def revoke_token(token_id):
     finally:
         db.close()
 
-def update_recording_flag(user_id, recording: bool):
+def update_recording_flag(user_id, recording: bool, hum, press):
     db = get_db()
     try:
         tokens = db.execute(sa.select(api_tokens).where(api_tokens.c.user_id == user_id)).fetchall()
         for t in tokens:
             cfg = json.loads(t.config) if t.config else {}
             cfg['recording'] = recording
+            cfg['hum'] = hum
+            cfg['press'] = press
             db.execute(api_tokens.update().where(api_tokens.c.id == t.id).values(config=json.dumps(cfg)))
         db.commit()
     finally:
         db.close()
 
+def get_user_devices(user_id):
+    db = get_db()
+    try:
+        tokens = db.execute(sa.select(api_tokens).where(api_tokens.c.user_id == user_id)).fetchall()
+        devices = [f"device_{t.id}" for t in tokens if t.id]
+        return list(set(devices))
+    finally:
+        db.close()
 
 
-def query_measurements(limit=1000, since_minutes=60, device_id=None):
+def query_measurements(user_id, limit=1000, since_minutes=60, device_id=None):
     db = get_db()
     try:
         cutoff = datetime.utcnow() - timedelta(minutes=since_minutes)
         sel = sa.select(measurements).where(measurements.c.timestamp >= cutoff).order_by(measurements.c.timestamp.desc())
-        if device_id:
+      
+        user_devices = get_user_devices(user_id)
+        if not user_devices:
+            return pd.DataFrame()  
+
+        sel = sel.where(measurements.c.device_id.in_(user_devices))
+
+        if device_id and device_id in user_devices:
             sel = sel.where(measurements.c.device_id == device_id)
+
         rows = db.execute(sel.limit(limit)).fetchall()
         data = [dict(r._mapping) for r in rows]
         df = pd.DataFrame(data)
         if not df.empty and 'metadata' in df.columns:
             df['metadata'] = df['metadata'].apply(parse_metadata) 
-            df['pressure'] = df['metadata'].apply(lambda m: float(m.get('pressure')) if m.get('pressure') is not None else float('nan'))
-            df['humidity'] = df['metadata'].apply(lambda m: float(m.get('humidity')) if m.get('humidity') is not None else float('nan'))
         return df
     finally:
         db.close()
@@ -444,18 +504,22 @@ else:
     from streamlit_autorefresh import st_autorefresh
 
     
-    def get_node_status():
+    def get_node_status(user_id):
+        """
+        Returns a DataFrame of devices (nodes) owned by this user, with last seen, lag, and online status.
+        """
         db = get_db()
         try:
-            nodes = db.execute(sa.select(sa.distinct(measurements.c.device_id))).fetchall()
-            nodes = [n[0] for n in nodes]
-
+            # Hol alle Tokens des Users
+            tokens = db.execute(sa.select(api_tokens).where(api_tokens.c.user_id == user_id)).fetchall()
+            devices = [t.name for t in tokens if t.name]
             status_list = []
+
             now = datetime.utcnow()
-            for node in nodes:
+            for device in devices:
                 last_row = db.execute(
                     sa.select(measurements)
-                    .where(measurements.c.device_id == node)
+                    .where(measurements.c.device_id == device)
                     .order_by(measurements.c.timestamp.desc())
                     .limit(1)
                 ).fetchone()
@@ -463,7 +527,7 @@ else:
                 if last_row:
                     last_seen = last_row.timestamp
                     lag = (now - last_seen).total_seconds()
-                    online = lag < 5  
+                    online = lag < 5
                     display_lag = round(lag, 1) if lag < 120 else "-"
                 else:
                     last_seen = None
@@ -471,23 +535,24 @@ else:
                     online = False
                     display_lag = "-"
 
-
                 status_list.append({
-                    "Device": node,
+                    "Device": device,
                     "Last Seen": last_seen.strftime("%H:%M:%S") if last_seen else "Never",
                     "Lag (s)": display_lag,
                     "Status": "🟢 Online" if online else "🔴 Offline"
                 })
+
             return pd.DataFrame(status_list)
         finally:
             db.close()
+
 
     st.header("Node Overview")
 
     placeholder = st.empty()
 
     with placeholder.container():
-        df_nodes = get_node_status()
+        df_nodes = get_node_status(user['id'])
         if not df_nodes.empty:
             st.table(df_nodes)
         else:
@@ -526,10 +591,9 @@ else:
 
     # --- Live view & controls ---
     st.header("Live Sensor View & Recording")
-    devices = db.execute(sa.select(sa.distinct(measurements.c.device_id))).fetchall()
-    devices = [d[0] for d in devices] if devices else []
-    selected_device = st.selectbox("Select Device (Live)", options=["all"]+devices)
-    since_minutes = st.slider("Period (min)", 1, 1440, 60)
+    user_devices = get_user_devices(user['id'])
+    selected_device = st.selectbox("Select Device (Live)", options=["all"]+user_devices)
+    since_minutes = st.slider("Period (min)", 1, 10080, 60)
     refresh = st.slider("Refresh (s)", 1, 5, 2)
 
     # Baseline & experiment controls
@@ -592,11 +656,11 @@ else:
         st.session_state.record_start = datetime.utcnow().isoformat()
         st.session_state.pressure_value = pressure_val
         st.session_state.humidity_value = humidity_val
-        update_recording_flag(user['id'], True)
+        update_recording_flag(user['id'], True, humidity_val, pressure_val)
 
     if rec_col2.button("Stop Recording"):
         st.session_state.recording = False
-        update_recording_flag(user['id'], False)
+        update_recording_flag(user['id'], False, humidity_val, pressure_val)
 
 
 
@@ -606,7 +670,7 @@ else:
     placeholder = st.empty()
 
     with placeholder.container():
-        df = query_measurements(limit=1000, since_minutes=since_minutes,
+        df = query_measurements(user['id'], limit=1000, since_minutes=since_minutes,
                                 device_id=None if selected_device=="all" else selected_device)
 
         if df is not None and not df.empty:
@@ -634,7 +698,7 @@ else:
 
 
     if st.button("Generate PDF Report (EXPERIMENTAL v.1.5)"):
-        df_all = query_measurements(limit=5000, since_minutes=24*60)
+        df_all = query_measurements(user['id'], limit=50000, since_minutes=7*24*60)         ### INPUT
         if df_all.empty:
             st.warning("No data available for report.")
         else:
@@ -650,7 +714,7 @@ else:
                 pdf_bytes = generate_experiment_report(
                     df_record,
                     df_baseline,
-                    device_filter=None
+                    device_filter=None                                          ### INPUT
                 )
                 st.download_button(
                     "Download PDF Report",

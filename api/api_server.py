@@ -61,8 +61,8 @@ class UploadPayload(BaseModel):
     device_id: str
     gsr: float | None = None
     pulse: float | None = None
-    humidity: float | None = None
-    pressure: float | None = None
+    humidity: float 
+    pressure: float
     metadata: dict | None = None
 
 def verify_token(db, token_str: str):
@@ -115,8 +115,8 @@ def get_node_config(token: str):
                 "interval": 2,
                 "gsr_range": [0.1, 10.0],
                 "pulse_range": [60, 100],
-                "pressure": 100.0,
-                "humidity": 50.0,
+                "pressure": config.get('press'),
+                "humidity": config.get('hum'),
             }
         return config
     finally:
