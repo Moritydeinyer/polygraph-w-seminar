@@ -90,14 +90,14 @@ from datetime import datetime
 def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, device_filter: str = None) -> bytes:
     """
     Generates a PDF report for GSR sensor experiments comparing recorded data to baseline.
-    Focused on GSR baseline and per-humidity/pressure analysis.
+    Now shows only mean GSR per X-value with ±1σ error bars to reduce Y-axis spread.
     """
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4)
     styles = getSampleStyleSheet()
     content = []
 
-    # --- fix: ensure metadata is parsed ---
+    # --- parse metadata ---
     df['metadata'] = df['metadata'].apply(parse_metadata)
     baseline_df['metadata'] = baseline_df['metadata'].apply(parse_metadata)
 
@@ -108,7 +108,7 @@ def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, devi
 
     devices = df['device_id'].unique()
 
-    # --- header  ---
+    # --- header ---
     content.append(Paragraph("Polygraph Lab — Automatic Experiment Report", styles['Title']))
     content.append(Spacer(1, 12))
     content.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()} UTC", styles['Normal']))
@@ -138,7 +138,6 @@ def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, devi
         base_press = device_baseline['pressure'].mean(skipna=True)
         base_hum = device_baseline['humidity'].mean(skipna=True)
 
-        # Show baseline GSR stats
         content.append(Paragraph(f"GSR Baseline: {baseline_mean:.3f} ± {baseline_std:.3f}", styles['Normal']))
         content.append(Paragraph(f"Baseline Pressure: {base_press:.1f} g | Baseline Humidity: {base_hum:.1f} %", styles['Normal']))
         content.append(Spacer(1, 12))
@@ -153,100 +152,77 @@ def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, devi
         ax.legend()
         plt.xticks(rotation=30)
         plt.tight_layout()
-        
         img_buf = io.BytesIO()
         fig.savefig(img_buf, format='PNG', bbox_inches='tight')
         img_buf.seek(0)
-
-        svg_buf = io.BytesIO()
-        fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
-        svg_buf.seek(0)
-
         content.append(Image(img_buf, width=450, height=200))
         plt.close(fig)
         content.append(Spacer(1, 24))
 
-
-        # === HUMIDITY ANALYSIS ===
+        # === HUMIDITY ANALYSIS (Mean + σ) ===
         hum_levels = sorted(device_df['humidity'].dropna().unique())
         for hum in hum_levels:
             hum_df = device_df[device_df['humidity'] == hum]
             if hum_df.empty:
                 continue
 
-            x_vals = hum_df['pressure']
-            y_vals = hum_df['gsr']
+            # Gruppieren nach Pressure
+            grouped = hum_df.groupby('pressure')['gsr']
+            x_vals = []
+            y_means = []
+            y_errs = []
+            for press, group in grouped:
+                x_vals.append(press)
+                y_means.append(group.mean())
+                y_errs.append(group.std())
 
             fig, ax = plt.subplots(figsize=(6, 3))
-            ax.scatter(x_vals, y_vals, color='blue', alpha=0.7)
+            ax.errorbar(x_vals, y_means, yerr=y_errs, fmt='o', color='blue',
+                        ecolor='gray', capsize=5, label='Mean ±1σ')
             ax.axhline(y=baseline_mean, color='r', linestyle='--', label='Baseline')
             ax.set_xlabel("Pressure (g)")
             ax.set_ylabel("GSR")
-            ax.set_title(f"GSR vs Pressure @ {hum:.1f}% Humidity")
+            ax.set_title(f"GSR vs Pressure @ {hum:.1f}% Humidity (Mean ± σ)")
             ax.legend()
             plt.tight_layout()
-
             img_buf = io.BytesIO()
             fig.savefig(img_buf, format='PNG', bbox_inches='tight')
             img_buf.seek(0)
-
-            svg_buf = io.BytesIO()
-            fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
-            svg_buf.seek(0)
-
             content.append(Image(img_buf, width=450, height=200))
             plt.close(fig)
-
-            # max gsr for humidity
-            idxmax = y_vals.idxmax()
-            if pd.notna(idxmax):
-                opt_press = hum_df.loc[idxmax, 'pressure']
-                opt_gsr = hum_df.loc[idxmax, 'gsr']
-                content.append(Paragraph(f"Max GSR: {opt_gsr:.3f} @ {opt_press:.1f} g", styles['Normal']))
-            else:
-                content.append(Paragraph("No valid max-values available.", styles['Normal']))
             content.append(Spacer(1, 24))
 
-
-        # === PRESSURE ANALYSIS ===
+        # === PRESSURE ANALYSIS (Mean + σ) ===
         pres_levels = sorted(device_df['pressure'].dropna().unique())
         for pres in pres_levels:
             pres_df = device_df[device_df['pressure'] == pres]
             if pres_df.empty:
                 continue
 
-            x_vals = pres_df['humidity']
-            y_vals = pres_df['gsr']
+            grouped = pres_df.groupby('humidity')['gsr']
+            x_vals = []
+            y_means = []
+            y_errs = []
+            for hum_val, group in grouped:
+                x_vals.append(hum_val)
+                y_means.append(group.mean())
+                y_errs.append(group.std())
 
             fig, ax = plt.subplots(figsize=(6, 3))
-            ax.scatter(x_vals, y_vals, color='green', alpha=0.7)
+            ax.errorbar(x_vals, y_means, yerr=y_errs, fmt='o', color='green',
+                        ecolor='gray', capsize=5, label='Mean ±1σ')
             ax.axhline(y=baseline_mean, color='r', linestyle='--', label='Baseline')
             ax.set_xlabel("Humidity (%)")
             ax.set_ylabel("GSR")
-            ax.set_title(f"GSR vs Humidity @ {pres:.1f} g Pressure")
+            ax.set_title(f"GSR vs Humidity @ {pres:.1f} g Pressure (Mean ± σ)")
             ax.legend()
             plt.tight_layout()
-
             img_buf = io.BytesIO()
             fig.savefig(img_buf, format='PNG', bbox_inches='tight')
             img_buf.seek(0)
-
-            svg_buf = io.BytesIO()
-            fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
-            svg_buf.seek(0)
-
             content.append(Image(img_buf, width=450, height=200))
             plt.close(fig)
-
-            idxmax = y_vals.idxmax()
-            if pd.notna(idxmax):
-                opt_hum = pres_df.loc[idxmax, 'humidity']
-                opt_gsr = pres_df.loc[idxmax, 'gsr']
-                content.append(Paragraph(f"Max GSR: {opt_gsr:.3f} @ {opt_hum:.1f}% Humidity", styles['Normal']))
-            else:
-                content.append(Paragraph("No valid max-values available.", styles['Normal']))
             content.append(Spacer(1, 24))
-
 
         # === HISTOGRAM ===
         fig, ax = plt.subplots(figsize=(6, 3))
@@ -255,19 +231,12 @@ def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, devi
         ax.set_xlabel("GSR")
         ax.set_ylabel("Count")
         plt.tight_layout()
-
         img_buf = io.BytesIO()
         fig.savefig(img_buf, format='PNG', bbox_inches='tight')
         img_buf.seek(0)
-
-        svg_buf = io.BytesIO()
-        fig.savefig(svg_buf, format='SVG', bbox_inches='tight')
-        svg_buf.seek(0)
-
         content.append(Image(img_buf, width=450, height=200))
         plt.close(fig)
         content.append(Spacer(1, 24))
-
 
         # === OVERALL OPTIMAL PRESSURE ===
         pressure_means = device_df.groupby('pressure')['gsr'].mean()
@@ -278,11 +247,12 @@ def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, devi
             content.append(Paragraph("Overall optimal pressure: N/A", styles['Normal']))
         content.append(Spacer(1, 36))
 
-
     # === finish ===
     doc.build(content)
     buf.seek(0)
     return buf.read()
+
+
 
 
 
@@ -512,7 +482,7 @@ else:
         try:
             # Hol alle Tokens des Users
             tokens = db.execute(sa.select(api_tokens).where(api_tokens.c.user_id == user_id)).fetchall()
-            devices = [t.name for t in tokens if t.name]
+            devices = [f"device_{t.id}" for t in tokens if t.name]
             status_list = []
 
             now = datetime.utcnow()
