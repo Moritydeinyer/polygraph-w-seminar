@@ -114,11 +114,12 @@ def generate_experiment_report(df: pd.DataFrame, baseline_df: pd.DataFrame, devi
     content.append(Paragraph(f"Generated: {datetime.utcnow().isoformat()} UTC", styles['Normal']))
     content.append(Spacer(1, 12))
     content.append(Paragraph(
-        "Experiment Objective: Wie beeinflussen physikalische Faktoren - insbesondere Auflagedruck und "
-        "Feuchtigkeit - die Messgenauigkeit eines Lügendetektors basierend auf der galvanischen Hautreaktion (GSR).",
+        "Experiment Objective: How do physical factors—in particular contact pressure and "
+        "moisture—affect the measurement accuracy of a lie detector based on galvanic skin response (GSR)?",
         styles['Normal']
     ))
     content.append(Spacer(1, 24))
+
 
     # --- device loop ---
     for device in devices:

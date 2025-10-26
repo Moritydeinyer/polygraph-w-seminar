@@ -6,7 +6,7 @@ from datetime import datetime
 
 # === CONFIG ===
 API_BASE = "https://polygraph-w.ddns.net/api"  # URL zu deinem FastAPI Server
-TOKEN = "API_KEY"           # Token aus Streamlit UI
+TOKEN = "API_TOKEN"           # Token aus Streamlit UI
 
 CONFIG_POLL_INTERVAL = 10  # s, wie oft neue Config geladen wird
 
@@ -30,8 +30,6 @@ def generate_measurement(cfg):
         "device_id": cfg["device_id"],
         "gsr": gsr,
         "pulse": pulse,
-        "humidity": None,
-        "pressure": None,
         "humidity": cfg.get("humidity"),
         "pressure": cfg.get("pressure"),
         "metadata": {"simulated": True}
@@ -42,7 +40,7 @@ def send_measurement(data):
     try:
         r = requests.post(f"{API_BASE}/upload", json=data, timeout=5)
         r.raise_for_status()
-        print(f"[{datetime.utcnow()}] Upload OK: GSR={data['gsr']}, Pulse={data['pulse']}")
+        print(f"[{datetime.utcnow()}] Upload OK: GSR={data['gsr']}, Pulse={data['pulse']}, Humidity={data['humidity']}, Pressure={data['pressure']}")
     except Exception as e:
         print(f"[{datetime.utcnow()}] Upload failed: {e}")
 
